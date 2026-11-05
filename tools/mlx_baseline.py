@@ -62,7 +62,7 @@ def run_full(fe, B, max_batches):
     D = mx.array(numpy.stack(fe.whitened))                   # (nseg, N) complex64
     mx.eval(D)
     an = [seg.analyze for seg in fe.segments]
-    gpu, pairs, check = 0.0, 0, None
+    gpu, pairs, valid, check = 0.0, 0, 0, None
     T = len(bank)
     for bi, t0 in enumerate(range(0, T, B)):
         if max_batches and bi >= max_batches:
@@ -92,6 +92,7 @@ def run_full(fe, B, max_batches):
             host.append((numpy.array(m), numpy.array(i), numpy.array(hit)))
         gpu += time.perf_counter() - t
         pairs += len(rows) * len(an)
+        valid += len(rows) * sum(a.stop - a.start for a in an)
         if check is None:
             # float64 numpy: template rows[0], segment 0
             a = an[0]
@@ -102,7 +103,8 @@ def run_full(fe, B, max_batches):
             norm0 = 4 * fe.delta_f / math.sqrt(sig[0, 0])
             mk = ref > (THR / norm0) ** 2
             check = float(numpy.max(numpy.abs(got[mk] - ref[mk]) / ref[mk])) if mk.any() else 0.0
-    return dict(mode='full', n=N, pairs=pairs, gpu_s=gpu, ms_per_pair=1e3 * gpu / max(pairs, 1),
+    return dict(mode='full', n=N, pairs=pairs, valid_samples=valid, gpu_s=gpu,
+                ms_per_pair=1e3 * gpu / max(pairs, 1),
                 check_max_rel_binmax_power=check, tmpl_batch=B)
 
 
@@ -112,7 +114,7 @@ def run_blocks(fe, B, cache_path, max_batches):
     sr = Search(fe, c, tmpl_batch=B)
     series = [mx.array(x) for x in fe.series]
     mx.eval(*series)
-    gpu, prep, pairs, check = 0.0, 0.0, 0, None
+    gpu, prep, pairs, valid, check = 0.0, 0.0, 0, 0, None
     for bi, batch in enumerate(sr.batches()):
         if max_batches and bi >= max_batches:
             break
@@ -142,6 +144,7 @@ def run_blocks(fe, B, cache_path, max_batches):
             numpy.array(i)
             gpu += time.perf_counter() - t
             pairs += len(starts) * len(batch)
+            valid += (seg.analyze.stop - seg.analyze.start) * len(batch)
             if check is None:
                 # float64 numpy for the batch's first template, first block
                 Hn = (c.spectra[batch[0]] * scale[0]).astype(complex)
@@ -151,7 +154,8 @@ def run_blocks(fe, B, cache_path, max_batches):
                 got = hm[0, 0]
                 mk = ref > THR ** 2
                 check = float(numpy.max(numpy.abs(got[mk] - ref[mk]) / ref[mk])) if mk.any() else 0.0
-    return dict(mode='blocks', n=n, pairs=pairs, gpu_s=gpu, host_prep_s=prep,
+    return dict(mode='blocks', n=n, pairs=pairs, valid_samples=valid, gpu_s=gpu,
+                host_prep_s=prep,
                 ms_per_pair=1e3 * gpu / max(pairs, 1), check_max_rel_binmax_power=check,
                 tmpl_batch=B)
 
