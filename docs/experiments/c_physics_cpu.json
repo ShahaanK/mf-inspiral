@@ -1,0 +1,137 @@
+{
+ "stock": 221314,
+ "new": 221301,
+ "matched": 221034,
+ "snr_rel_diff": {
+  "max": 0.0019251360110261258,
+  "p999": 0.0010872771760926487,
+  "p99": 0.0006363148153079621,
+  "median": 3.0604960785402056e-06
+ },
+ "sigmasq_rel_diff": {
+  "max": 8.106401929593872e-06,
+  "p999": 7.8594077440924e-06,
+  "p99": 6.142096815428472e-06,
+  "median": 0.0
+ },
+ "snr_rel_diff_by_duration": [
+  {
+   "duration_s": [
+    0,
+    2
+   ],
+   "n": 35672,
+   "max": 4.754657781629329e-06,
+   "p999": 3.373251707486393e-06,
+   "p99": 2.5763512264137984e-06,
+   "median": 6.014604187772459e-07
+  },
+  {
+   "duration_s": [
+    2,
+    4
+   ],
+   "n": 87754,
+   "max": 4.884852321333865e-05,
+   "p999": 2.861298357233291e-05,
+   "p99": 1.6950215694009486e-05,
+   "median": 1.0325240486334424e-06
+  },
+  {
+   "duration_s": [
+    4,
+    6
+   ],
+   "n": 74086,
+   "max": 0.0009515641663217272,
+   "p999": 0.0005894627932734661,
+   "p99": 0.00040184140949490094,
+   "median": 3.7307496304730413e-05
+  },
+  {
+   "duration_s": [
+    6,
+    7
+   ],
+   "n": 23522,
+   "max": 0.0019251360110261258,
+   "p999": 0.0014880608857189657,
+   "p99": 0.0010727239657033806,
+   "median": 0.00023503869153518108
+  }
+ ],
+ "by_threshold": [
+  {
+   "threshold": 3.8,
+   "stock": 221314,
+   "new": 221301,
+   "matched": 221034,
+   "stock_only": {
+    "total": 280,
+    "shift-1": 141,
+    "same-bin": 46,
+    "band": 41,
+    "other": 52
+   },
+   "new_only": {
+    "total": 267,
+    "shift-1": 141,
+    "same-bin": 46,
+    "band": 25,
+    "other": 55
+   }
+  },
+  {
+   "threshold": 5.0,
+   "stock": 4429,
+   "new": 4425,
+   "matched": 4420,
+   "stock_only": {
+    "total": 9,
+    "shift-1": 9,
+    "same-bin": 0,
+    "band": 0,
+    "other": 0
+   },
+   "new_only": {
+    "total": 5,
+    "shift-1": 5,
+    "same-bin": 0,
+    "band": 0,
+    "other": 0
+   }
+  },
+  {
+   "threshold": 6.0,
+   "stock": 181,
+   "new": 181,
+   "matched": 181,
+   "stock_only": {
+    "total": 0,
+    "shift-1": 0,
+    "same-bin": 0,
+    "band": 0,
+    "other": 0
+   },
+   "new_only": {
+    "total": 0,
+    "shift-1": 0,
+    "same-bin": 0,
+    "band": 0,
+    "other": 0
+   }
+  }
+ ],
+ "bank_mismatch": {
+  "C3_segment0": {
+   "median_fitting_factor": 0.994975141516684,
+   "p10_fitting_factor": 0.9901574232453977,
+   "median_snr_loss": 0.005024858483316019
+  },
+  "aLIGOZeroDetLowPower": {
+   "median_fitting_factor": 0.9879009796301019,
+   "p10_fitting_factor": 0.974358018326872,
+   "median_snr_loss": 0.012099020369898073
+  }
+ }
+}
