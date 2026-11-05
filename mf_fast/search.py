@@ -87,22 +87,27 @@ class Search(object):
     """Run the peak-only search over all segments for a template cache."""
 
     def __init__(self, frontend, cache, threshold=3.8, device='cpu',
-                 tmpl_batch=64, binsize=2048, log=None):
+                 tmpl_batch=64, data_batch=0, binsize=2048, log=None):
         self.fe, self.cache = frontend, cache
         self.threshold = float(threshold)
         self.device = device
         self.tmpl_batch = int(tmpl_batch)
+        self.data_batch = int(data_batch)        # 0: all of a segment's blocks per call
         self.binsize = int(binsize)
         self.log = log or (lambda *a: None)
         self.timing = dict(scale=0.0, ingest=0.0, filter=0.0, stitch=0.0, cluster=0.0)
         self.counts = dict(pairs=0, valid_samples=0, calls=0)
 
     def batches(self):
-        """Template batches in order of support, so a batch's L, R are close
-        to its members'."""
-        order = numpy.argsort(self.cache.support, kind='stable')
-        for i in range(0, len(order), self.tmpl_batch):
-            yield order[i:i + self.tmpl_batch]
+        """Template batches ordered by padding (R), then support, so a batch's
+        largest L and largest R come from like templates: mixing 2 s and 4 s
+        padding could need L + R beyond any member's own support."""
+        c = self.cache
+        for r in numpy.unique(c.R):
+            group = numpy.nonzero(c.R == r)[0]
+            group = group[numpy.argsort(c.support[group], kind='stable')]
+            for i in range(0, len(group), self.tmpl_batch):
+                yield group[i:i + self.tmpl_batch]
 
     def run(self):
         fe, c, bs = self.fe, self.cache, self.binsize
@@ -120,20 +125,29 @@ class Search(object):
                                     dtype=numpy.float32)
                 spectra = c.spectra[batch] * scale[:, None]
                 self.timing['scale'] += time.perf_counter() - t
-                key = (len(starts), len(batch))
+                nd = self.data_batch or len(starts)
+                key = (min(nd, len(starts)), len(batch))
                 filt = filters.get(key)
                 if filt is None:
-                    filt = filters[key] = mf.MatchedFilter(n, ndata=len(starts),
+                    filt = filters[key] = mf.MatchedFilter(n, ndata=key[0],
                                                            ntemplates=len(batch),
                                                            device=self.device)
                 t = time.perf_counter()
                 filt.set_templates(spectra)
                 self.timing['ingest'] += time.perf_counter() - t
                 t = time.perf_counter()
-                idx, val = run_blocks_ragged(filt, fe.series[s], starts, ws, we, bs,
-                                             self.threshold)
+                # blocks in groups of data_batch (all of the segment's by default)
+                parts = [run_blocks_ragged(filt, fe.series[s], starts[g:g + nd], ws[g:g + nd],
+                                           we[g:g + nd], bs, self.threshold)
+                         for g in range(0, len(starts), nd)]
                 self.timing['filter'] += time.perf_counter() - t
-                self.counts['calls'] += 1
+                nbmax = max(p[0].shape[2] for p in parts)
+                idx = numpy.full((len(starts), len(batch), nbmax), -1, numpy.int64)
+                val = numpy.zeros((len(starts), len(batch), nbmax), numpy.complex64)
+                for g, (pi, pv) in zip(range(0, len(starts), nd), parts):
+                    idx[g:g + len(pi), :, :pi.shape[2]] = pi
+                    val[g:g + len(pi), :, :pi.shape[2]] = pv
+                self.counts['calls'] += len(parts)
                 self.counts['pairs'] += len(starts) * len(batch)
                 self.counts['valid_samples'] += (an.stop - an.start) * len(batch)
                 t = time.perf_counter()

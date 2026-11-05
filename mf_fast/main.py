@@ -44,7 +44,17 @@ def build_parser():
                    help="tools/cutoff_errors.py output for this job's data: templates "
                         "whose measured cut-off error at --pad exceeds the budget get "
                         "--pad-fallback. Without it, the calibrated estimate decides.")
+    p.add_argument('--save-cache',
+                   help="Write the built template cache here (.npz) for later jobs.")
+    p.add_argument('--load-cache',
+                   help="Load a saved template cache instead of building one. Its padding "
+                        "decisions are the build job's; sigma^2 is computed for this job.")
     p.add_argument('--tmpl-batch', type=int, default=64)
+    p.add_argument('--data-batch', type=int, default=0,
+                   help="Blocks per filter call (0: all of a segment's blocks).")
+    p.add_argument('--fit-only', action='store_true',
+                   help="Skip templates whose support doesn't fit --block-length "
+                        "(for block-length sweeps; the output then covers only the rest).")
     p.add_argument('--timing-json')
     p.add_argument('--verbose', action='store_true')
     return p
@@ -64,23 +74,43 @@ def main(argv=None):
     tim['front_end'] = time.time() - t0
 
     t = time.time()
-    measured = None
-    if a.cutoff_measurements:
-        with open(a.cutoff_measurements) as f:
-            measured = {r['row']: r['pad%g' % a.pad]['max_rel'] for r in json.load(f)}
-    bank = waveform.FilterBank(a.bank, fe.flen, fe.delta_f, low_frequency_cutoff=None,
-                               dtype=complex64, out=zeros(fe.tlen, dtype=complex64))
-    cache = TemplateCache(bank, fe, n=a.block_length, pad=a.pad,
-                          pad_fallback=a.pad_fallback, taper_low=a.taper_low,
-                          taper_high=a.taper_high, measured=measured, log=log)
-    tim['templates'] = time.time() - t
+    if a.load_cache:
+        cache = TemplateCache.load(a.load_cache, fe, a.bank)
+        if cache.n != a.block_length:
+            raise SystemExit("cache %s was built for n=%d, not --block-length %d"
+                             % (a.load_cache, cache.n, a.block_length))
+        tim['cache_load'] = cache.load_time
+        log("loaded template cache %s in %.2f s (sigma^2 %.2f s)", a.load_cache,
+            cache.load_time, cache.sigmasq_time)
+    else:
+        measured = None
+        if a.cutoff_measurements:
+            with open(a.cutoff_measurements) as f:
+                measured = {r['row']: r['pad%g' % a.pad]['max_rel'] for r in json.load(f)}
+        bank = waveform.FilterBank(a.bank, fe.flen, fe.delta_f, low_frequency_cutoff=None,
+                                   dtype=complex64, out=zeros(fe.tlen, dtype=complex64))
+        cache = TemplateCache.build(bank, fe, a.bank, n=a.block_length, pad=a.pad,
+                                    pad_fallback=a.pad_fallback, taper_low=a.taper_low,
+                                    taper_high=a.taper_high, measured=measured,
+                                    fit_only=a.fit_only, log=log)
+        if len(cache.skipped_rows):
+            log("fit-only: skipped %d templates that don't fit n=%d", len(cache.skipped_rows),
+                a.block_length)
+        tim.update({'cache_build_' + k: v for k, v in cache.build_timing.items()})
+        if a.save_cache:
+            ts = time.time()
+            cache.save(a.save_cache)
+            tim['cache_save'] = time.time() - ts
+            log("saved template cache to %s in %.2f s", a.save_cache, tim['cache_save'])
+    tim['cache_sigmasq'] = cache.sigmasq_time
+    tim['templates'] = time.time() - t - tim.get('cache_save', 0.0)
     fb = cache.fallback_rows
     log("templates: %d; %d on %.1f s fallback padding (%s rule): %s", len(cache.rows),
         len(fb), a.pad_fallback, cache.switch_rule, fb.tolist())
 
     t = time.time()
     search = Search(fe, cache, threshold=a.threshold, device=a.device,
-                    tmpl_batch=a.tmpl_batch, log=log)
+                    tmpl_batch=a.tmpl_batch, data_batch=a.data_batch, log=log)
     events = search.run()
     tim['search'] = time.time() - t
     tim.update({'search_' + k: v for k, v in search.timing.items()})
@@ -94,6 +124,7 @@ def main(argv=None):
     if a.timing_json:
         info = dict(timing=tim, counts=search.counts, triggers=ntrig,
                     fallback_rows=fb.tolist(), switch_rule=cache.switch_rule,
+                    templates_used=len(cache.rows),
                     args=vars(a),
                     matchedfilter=matchedfilter.__version__,
                     backend=matchedfilter.backend())

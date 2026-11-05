@@ -13,7 +13,10 @@ matchedfilter's overlap-save blocks filter exactly like a full-length filter
 with the same truncated template (docs/short-block-check.md §1).
 """
 
+import json
 import math
+import os
+import time
 
 import numpy
 
@@ -26,12 +29,14 @@ from pycbc.waveform.utils import fd_taper
 CUTOFF_BUDGET = 5e-6
 
 
-def tapered_template(bank, index, flow, taper_low, taper_high):
+def tapered_template(bank, index, flow, taper_low, taper_high, timing=None):
     """Full-length tapered spectrum of bank template ``index``.
 
     Returns (complex128 numpy array of length flen, chirp length in seconds
-    from the lowered start frequency).
+    from the lowered start frequency). ``timing``, if given, accumulates the
+    seconds spent in 'generate' and 'taper'.
     """
+    t0 = time.perf_counter()
     df = bank.delta_f
     f_end = bank.end_frequency(index)
     if f_end is None or f_end >= bank.filter_length * df:
@@ -43,6 +48,7 @@ def tapered_template(bank, index, flow, taper_low, taper_high):
         f_lower=f_start, f_final=f_end, delta_f=df, delta_t=bank.delta_t,
         distance=1.0 / DYN_RANGE_FAC, f_ref=flow)
     chirp = h.chirp_length
+    t1 = time.perf_counter()
     # fd_taper's window is float64, so it needs a double-precision series.
     H = FrequencySeries(h.numpy().astype(numpy.complex128), delta_f=df)
     if taper_low:
@@ -51,105 +57,199 @@ def tapered_template(bank, index, flow, taper_low, taper_high):
         nz = numpy.nonzero(numpy.abs(H.numpy()) > 0)[0]
         f_hi = (nz[-1] + 1) * df
         H = fd_taper(H, f_hi - taper_high, f_hi, beta=8, side='right')
+    if timing is not None:
+        timing['generate'] = timing.get('generate', 0.0) + t1 - t0
+        timing['taper'] = timing.get('taper', 0.0) + time.perf_counter() - t1
     return H.numpy(), chirp
 
 
+def template_power(H, kmin, kmax):
+    """|H|^2 on the data band [kmin, kmax), rounded to float32.
+
+    sigma^2 is always computed from this float32 power (sigmasq_from_power), so
+    a cache loaded from disk gives exactly the sigma^2 of a fresh build.
+    """
+    return (numpy.abs(H[kmin:kmax]) ** 2).astype(numpy.float32)
+
+
+def sigmasq_from_power(power, psd, kmin, delta_f):
+    """4 df sum power / S, power starting at bin kmin, summed in float64."""
+    p = psd.numpy()[kmin:kmin + len(power)].astype(numpy.float64)
+    return 4.0 * delta_f * float(numpy.sum(power.astype(numpy.float64) / p))
+
+
 def sigmasq(H, psd, kmin, kmax, delta_f):
-    """4 df sum |H|^2 / S over [kmin, kmax), in float64."""
-    p = psd.numpy()[kmin:kmax].astype(numpy.float64)
-    return 4.0 * delta_f * float(numpy.sum(numpy.abs(H[kmin:kmax]) ** 2 / p))
+    """sigma^2 of spectrum H over [kmin, kmax), by the float32-power definition."""
+    return sigmasq_from_power(template_power(H, kmin, kmax), psd, kmin, delta_f)
+
+
+def _trim(power):
+    """The power up to its last nonzero bin (templates end before Nyquist)."""
+    nz = numpy.nonzero(power)[0]
+    return power[:nz[-1] + 1] if len(nz) else power[:0]
 
 
 class TemplateCache(object):
     """Every bank template as an n-point spectrum, with its support and norms.
 
-    Parameters
-    ----------
-    bank : pycbc.waveform.FilterBank
-        The bank, built on the job's frequency grid (flen, delta_f).
-    frontend : FrontEnd
-        Supplies the grid, kmin/kmax and the segment PSDs for sigma^2.
-    n : int
-        Block length (power of two).
-    pad, pad_fallback : float
-        Padding in seconds either side of the chirp, and the larger padding
-        used for a template whose cut-off error exceeds CUTOFF_BUDGET.
-    measured : dict, optional
-        Bank row -> measured cut-off error at ``pad`` (tools/cutoff_errors.py
-        on this job's data). When given, it decides which templates get the
-        fallback. Otherwise the data-independent estimate does, scaled by
-        CUTOFF_RATIO.
+    Build with ``TemplateCache.build`` or load a saved one with
+    ``TemplateCache.load``; then ``set_psds`` computes sigma^2 for the job.
+
+    The padding decision (``pad`` or ``pad_fallback`` per template) is made at
+    build time: from ``measured`` (bank row -> measured cut-off error at ``pad``,
+    tools/cutoff_errors.py) when given, otherwise from the data-independent
+    estimate sqrt(sigma_tail^2 / sigma^2) on the build job's PSDs, scaled by
+    CUTOFF_RATIO. A saved cache keeps its build's decisions.
     """
 
-    def __init__(self, bank, frontend, n=65536, pad=2.0, pad_fallback=4.0,
-                 taper_low=4.0, taper_high=4.0, indices=None, keep_full=False,
-                 measured=None, log=None):
+    META = ('n', 'tlen', 'delta_f', 'kmin', 'kmax', 'flow', 'sample_rate', 'taper_low',
+            'taper_high', 'pad_base', 'pad_fallback', 'switch_rule', 'bank_file')
+    ARRAYS = ('rows', 'hashes', 'duration', 'chirp', 'L', 'R', 'pad', 'cutoff_estimate',
+              'spectra')
+
+    @classmethod
+    def build(cls, bank, frontend, bank_file, n=65536, pad=2.0, pad_fallback=4.0,
+              taper_low=4.0, taper_high=4.0, indices=None, measured=None, fit_only=False,
+              log=None):
         fe = frontend
-        self.n = int(n)
-        self.pad_base = pad
-        self.switch_rule = 'measured' if measured is not None else 'estimate'
-        self.flow = fe.flow
-        self.delta_f = fe.delta_f
-        self.taper_low, self.taper_high = taper_low, taper_high
+        c = cls()
+        c.n, c.tlen, c.delta_f = int(n), fe.tlen, fe.delta_f
+        c.kmin, c.kmax, c.flow, c.sample_rate = fe.kmin, fe.kmax, fe.flow, fe.sample_rate
+        c.taper_low, c.taper_high = taper_low, taper_high
+        c.pad_base, c.pad_fallback = pad, pad_fallback
+        c.switch_rule = 'measured' if measured is not None else 'estimate'
+        c.bank_file = bank_file
         N, fs = fe.tlen, fe.sample_rate
-        idx = range(len(bank)) if indices is None else indices
-        self.rows = numpy.array(list(idx), dtype=numpy.int64)
-        T = len(self.rows)
-        self.spectra = numpy.zeros((T, self.n), dtype=numpy.complex64)
-        self.L = numpy.zeros(T, dtype=numpy.int64)
-        self.R = numpy.zeros(T, dtype=numpy.int64)
-        self.pad = numpy.zeros(T)
-        self.chirp = numpy.zeros(T)
-        self.cutoff_estimate = numpy.zeros(T)
-        self.sigmasq = numpy.zeros((T, len(fe.segments)))
-        self.hashes = numpy.asarray(bank.table.template_hash, dtype=numpy.int64)[self.rows]
-        self.duration = numpy.zeros(T, dtype=numpy.float32)
-        self.full = [] if keep_full else None
+        c.rows = numpy.array(list(range(len(bank)) if indices is None else indices),
+                             dtype=numpy.int64)
+        T = len(c.rows)
+        c.spectra = numpy.zeros((T, c.n), dtype=numpy.complex64)
+        c.L = numpy.zeros(T, dtype=numpy.int64)
+        c.R = numpy.zeros(T, dtype=numpy.int64)
+        c.pad = numpy.zeros(T)
+        c.chirp = numpy.zeros(T)
+        c.cutoff_estimate = numpy.full(T, numpy.nan)
+        c.hashes = numpy.asarray(bank.table.template_hash, dtype=numpy.int64)[c.rows]
+        c.duration = numpy.zeros(T, dtype=numpy.float32)
+        c.power = []
+        tm = dict.fromkeys(('generate', 'taper', 'time_domain', 'sigmasq', 'duration',
+                            'estimate'), 0.0)
         lag = numpy.arange(N)
         lag[lag >= N // 2] -= N
-        for j, ti in enumerate(self.rows):
-            H, chirp = tapered_template(bank, ti, fe.flow, taper_low, taper_high)
+        skipped = []
+        for j, ti in enumerate(c.rows):
+            H, chirp = tapered_template(bank, ti, fe.flow, taper_low, taper_high, timing=tm)
+            t = time.perf_counter()
             Hfull = numpy.zeros(N, numpy.complex128)
             Hfull[:fe.flen] = H
             h = numpy.fft.ifft(Hfull)
-            sig = [sigmasq(Hfull, p, fe.kmin, fe.kmax, fe.delta_f) for p in fe.psds]
-            self.sigmasq[j] = sig
+            tm['time_domain'] += time.perf_counter() - t
+            t = time.perf_counter()
+            power = _trim(template_power(Hfull, fe.kmin, fe.kmax))
+            c.power.append(power)
+            sig = [sigmasq_from_power(power, p, fe.kmin, fe.delta_f) for p in fe.psds]
+            tm['sigmasq'] += time.perf_counter() - t
+            t = time.perf_counter()
             # template_duration as stock writes it: the chirp length from flow.
             row = bank.table[ti]
-            self.duration[j] = pycbc.waveform.get_waveform_filter_length_in_time(
+            c.duration[j] = pycbc.waveform.get_waveform_filter_length_in_time(
                 approximant=bank.approximant(ti), mass1=row['mass1'], mass2=row['mass2'],
                 spin1z=row['spin1z'], spin2z=row['spin2z'], f_lower=fe.flow)
-            # Cut-off error estimate: the PSD-weighted norm of the discarded
-            # part, relative to the template's, sqrt(sigma_tail^2 / sigma^2), on
-            # the worst segment PSD. Larger padding is used if it is over budget.
+            tm['duration'] += time.perf_counter() - t
             for trial in (pad, pad_fallback):
                 L = int(math.ceil((chirp + trial) * fs))
                 R = int(math.ceil(trial * fs))
-                keep = (lag >= -L) & (lag <= R)
-                tail = Hfull - numpy.fft.fft(numpy.where(keep, h, 0))
-                est = max(math.sqrt(sigmasq(tail, p, fe.kmin, fe.kmax, fe.delta_f) / s)
-                          for p, s in zip(fe.psds, sig))
                 used = trial
                 if measured is not None:
                     over = measured[int(ti)] > CUTOFF_BUDGET
                 else:
+                    # the estimate costs one full-length FFT per padding tried
+                    t = time.perf_counter()
+                    keep = (lag >= -L) & (lag <= R)
+                    tail = Hfull - numpy.fft.fft(numpy.where(keep, h, 0))
+                    est = max(math.sqrt(sigmasq(tail, p, fe.kmin, fe.kmax, fe.delta_f) / s)
+                              for p, s in zip(fe.psds, sig))
+                    c.cutoff_estimate[j] = est
                     over = est * CUTOFF_RATIO > CUTOFF_BUDGET
+                    tm['estimate'] += time.perf_counter() - t
                 if trial == pad_fallback or not over:
                     break
-            if L + R + 1 + 2048 > self.n:
+            if L + R + 1 + 2048 > c.n:
+                if fit_only:
+                    skipped.append(j)
+                    continue
                 raise ValueError("template %d needs %.1f s of support; block length %d "
-                                 "is too short" % (ti, (L + R + 1) / fs, self.n))
-            hn = numpy.zeros(self.n, numpy.complex128)
+                                 "is too short (use fit_only to skip such templates)"
+                                 % (ti, (L + R + 1) / fs, c.n))
+            t = time.perf_counter()
+            hn = numpy.zeros(c.n, numpy.complex128)
             hn[:R + 1] = h[:R + 1]
-            hn[self.n - L:] = h[N - L:]
-            self.spectra[j] = numpy.fft.fft(hn).astype(numpy.complex64)
-            self.L[j], self.R[j] = L, R
-            self.pad[j], self.chirp[j], self.cutoff_estimate[j] = used, chirp, est
-            if keep_full:
-                self.full.append(Hfull.astype(numpy.complex64))
+            hn[c.n - L:] = h[N - L:]
+            c.spectra[j] = numpy.fft.fft(hn).astype(numpy.complex64)
+            tm['time_domain'] += time.perf_counter() - t
+            c.L[j], c.R[j] = L, R
+            c.pad[j], c.chirp[j] = used, chirp
             if log and (j + 1) % 50 == 0:
                 log("templates: %d/%d" % (j + 1, T))
+        c.build_timing = tm
+        c.skipped_rows = c.rows[skipped]
+        if skipped:
+            # drop templates that don't fit this block length (fit_only)
+            keep = numpy.setdiff1d(numpy.arange(T), skipped)
+            for k in cls.ARRAYS:
+                setattr(c, k, getattr(c, k)[keep])
+            c.power = [c.power[k] for k in keep]
+        c._finish()
+        c.set_psds(fe.psds)
+        return c
+
+    def _finish(self):
         self.support = self.L + self.R + 1
+
+    def set_psds(self, psds):
+        """sigma^2 of every template against every segment PSD of this job."""
+        t = time.perf_counter()
+        self.sigmasq = numpy.array([[sigmasq_from_power(pw, p, self.kmin, self.delta_f)
+                                     for p in psds] for pw in self.power])
+        self.sigmasq_time = time.perf_counter() - t
+
+    def save(self, path):
+        """Write the cache as an uncompressed .npz (fast to load)."""
+        lens = numpy.array([len(p) for p in self.power], dtype=numpy.int64)
+        arrays = {k: getattr(self, k) for k in self.ARRAYS}
+        meta = {k: getattr(self, k) for k in self.META}
+        numpy.savez(path, power=numpy.concatenate(self.power), power_len=lens,
+                    meta=numpy.array(json.dumps(meta)), **arrays)
+
+    @classmethod
+    def load(cls, path, frontend, bank_file):
+        """Load a saved cache, check it matches this job's grid and bank, and
+        compute sigma^2 for this job's PSDs."""
+        t = time.perf_counter()
+        z = numpy.load(path)
+        c = cls()
+        meta = json.loads(str(z['meta']))
+        for k, v in meta.items():
+            setattr(c, k, v)
+        fe = frontend
+        want = dict(tlen=fe.tlen, delta_f=fe.delta_f, kmin=fe.kmin, kmax=fe.kmax,
+                    flow=fe.flow, sample_rate=fe.sample_rate)
+        bad = {k: (meta[k], v) for k, v in want.items() if meta[k] != v}
+        if os.path.realpath(meta['bank_file']) != os.path.realpath(bank_file):
+            bad['bank_file'] = (meta['bank_file'], bank_file)
+        if bad:
+            raise ValueError("template cache %s doesn't match this job: %s" % (path, bad))
+        for k in cls.ARRAYS:
+            setattr(c, k, z[k])
+        lens = z['power_len']
+        flat = z['power']
+        ends = numpy.cumsum(lens)
+        c.power = [flat[e - n:e] for e, n in zip(ends, lens)]
+        c.build_timing = None
+        c._finish()
+        c.load_time = time.perf_counter() - t
+        c.set_psds(fe.psds)
+        return c
 
     @property
     def fallback_rows(self):

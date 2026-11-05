@@ -160,7 +160,89 @@ the bank's construction region, plus each template's nearest neighbour):
 - Above SNR 6 the trigger sets are identical. Above 5, all differences are 1–2-sample shifts of
   the same peak.
 
-## 4. Timing: not done (blocked)
+## 4. Template cache: cost breakdown, save and load, per-job projection
+
+**Not timing-grade:** these are from Claude-session runs with no quiet check. They're for the
+breakdown and the model; the session in §6 re-measures everything.
+
+### (a) Where the 34 s went
+
+Measured with per-stage timers (`TemplateCache.build_timing`, in `timing.json`):
+
+| stage | seconds (431 templates) | notes |
+|---|---|---|
+| waveform generation from 16 Hz (`get_waveform_filter`) | 9.92 | **the same as stock's 9.97 s** (from 20 Hz, C3 cProfile); the lower start costs nothing measurable |
+| two `fd_taper`s | 1.39 | the double-precision copy plus windows |
+| time-domain conversion | 8.07 | one 2²⁰ complex128 inverse FFT per template, the cut, and the n-point FFT |
+| σ² (float32 power, 4 PSDs) | 1.65 + 0.54 | build loop, plus the job's `set_psds` |
+| duration (stock's chirp length from 20 Hz) | 0.09 | |
+| cut-off estimate | 0 here (**12.5 s** when used) | one extra 2²⁰ FFT and 4 σ² per template; skipped when measured cut-offs are given |
+| **total** | **21.8** | was 34.3 s with the estimate on |
+
+So against stock's 10 s, the extra is the time-domain conversion (8 s), plus the estimate (12.5 s)
+when no measurements are given. Generation itself costs the same.
+
+### (b) Save and load (`--save-cache`, `--load-cache`)
+
+- **File:** `.npz`, uncompressed, **1.07 GB**. It holds:
+  - the n-point spectra, 431 × 65536 complex64 (226 MB);
+  - each template's float32 power |H|² on the data band, up to its last nonzero bin (about
+    850 MB). This is needed to compute σ² exactly against each job's PSDs.
+- **σ² definition:** σ² is always computed from that float32 power. That's a rounding-level
+  change from the earlier float64 |H|², applied in mf_fast and reference A alike, so a loaded
+  cache gives exactly a fresh build's σ².
+  - Verified: **build-run and load-run trigger files are bit-identical**, and both pass check A
+    after reference A was rerun.
+- **Load:** **0.21 s**, plus 0.68 s of σ² for 4 PSDs.
+  - The file had just been written, so it was in the OS page cache. A cold read of 1.07 GB will
+    be slower; it isn't measured, and flushing the page cache needs sudo.
+- **What's fixed at build:** the padding decisions (measured or estimate) and n. Load refuses a
+  cache whose grid, kmin/kmax, flow or bank file differs, or whose n differs from
+  `--block-length`.
+- **Not done:** a smaller file. Storing |H|² at reduced resolution would shrink it but change σ²;
+  not without measuring the effect.
+
+### (c) Per-job projection, cache + filter (front end excluded)
+
+`tools/project_cost.py` uses a linear model in segments S, fitted from the 4-segment runs. Stock
+uses C3's cProfile split: waveforms once per job, matched filter and σ² per segment.
+
+| segments per job | stock | mf_fast, cache built | mf_fast, cache loaded |
+|---|---|---|---|
+| model | 9.97 + 4.78 S | 21.3 + 1.85 S | 0.21 + 1.89 S |
+| 4 | 29.1 s | 28.7 s (1.0×) | 7.8 s (**3.7×**) |
+| 16 | 86.4 s | 50.8 s (1.7×) | 30.4 s (2.8×) |
+| 64 | 316 s | 139 s (2.3×) | 121 s (2.6×) |
+
+- On CPU, the filter is about 2.6× faster per segment than stock's 2²⁰ FFT path. That's the
+  limit as segments grow.
+- Building the cache costs about 2× stock's waveform step, so a loaded cache matters most for
+  short jobs.
+- The GPU timings will replace the 1.85 s/segment.
+
+## 5. Changes made while preparing the timing set
+
+- **Batches are now cut within each padding group** (2 s and 4 s), then by support.
+  - Before, a batch's largest L and largest R could come from different templates. At
+    n = 32768 that overflowed the block (L 26545 + R 8192), though each template fits alone.
+  - At 65536 it only cost valid fraction.
+  - Check A rerun after the change: PASS (max 4.38e-6, the same 7 explained near-ties).
+- **`--data-batch N`:** blocks per filter call. `--data-batch 4` is **bit-identical** to all
+  blocks per call. The advisor's 4 templates × 4 blocks passes check A (max 4.32e-6).
+- **`--fit-only`:** skips templates that don't fit `--block-length`, for the block-length sweep.
+  - n = 32768 keeps 386 of 431 templates, with the estimate rule (174 on 4 s padding).
+  - Check A on those 386: 197,666 of 197,667 matched, SNR max 3.0e-6.
+- `tools/mlx_baseline.py`: the MLX GPU baseline. **Untested**, because MLX can't load inside the
+  sandbox (no Metal device).
+- `tools/project_cost.py`: the per-job model above.
+- `tools/bench_session.zsh`: the whole timing session (§6).
+
+## 6. Timing: run by you outside Claude
+
+The sandbox blocks `top`, so all timing runs are done by you in one session
+(`tools/bench_session.zsh`). The earlier numbers in this file are therefore not timing-grade.
+
+## 7. Timing (superseded): what was blocked
 
 The `top -l 1 -n 10` quiet-machine check failed inside the sandbox:
 `(eval):1: operation not permitted: top`. Per instructions, I've stopped rather than check load
