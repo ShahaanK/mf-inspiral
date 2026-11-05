@@ -84,6 +84,31 @@
 For scale, the bank was built with minimal match 0.95 (`search/bank.sh`), i.e. up to **5% SNR
 loss** from template spacing. The chosen taper's worst case is about 2×10⁴ smaller.
 
+### Alternative start frequencies (added in Phase C at your request; report only)
+
+- Same 4 Hz high taper throughout.
+- "Group" means the 159 templates whose support is 12–16.1 s under the chosen taper.
+- The error column is the worst of the original 6-template sample (`b_taper.json`).
+- The in-band SNR change is **0 for every out-of-band start**: the in-band bins are
+  bit-identical to stock.
+
+| low-edge start | padding | cut-off error (6 templates) | longest template chirp | longest support | valid fraction at 65536: group | all |
+|---|---|---|---|---|---|---|
+| **16 Hz (chosen)** | 2 s | 4.5e-6 | 12.10 s | 16.1 s | 0.55 | 0.65 |
+| PyCBC 1% rule (≈ 17 Hz) | 2 s | 6.8e-6 (over) | 10.52 s | 14.5 s | 0.59 | 0.68 |
+| PyCBC 1% rule (≈ 17 Hz) | 4 s | 2.5e-6 | 10.52 s | 18.5 s | 0.47 | 0.55 |
+| 18 Hz | 2 s | 1.1e-5 (over) | 8.82 s | 12.8 s | 0.63 | 0.70 |
+| 18 Hz | 4 s | 2.9e-6 | 8.82 s | 16.8 s | 0.51 | 0.58 |
+| 19 Hz | 2 s | 8.6e-5 (over) | 7.63 s | 11.6 s | 0.66 | 0.73 |
+| 19 Hz | 8 s | 2.0e-6 | 7.63 s | 23.6 s | 0.29 | 0.35 |
+
+- 18 Hz and 19 Hz shorten the chirp but need more padding to meet the budget. Within budget,
+  16 Hz keeps the best valid fraction.
+- The full-bank measurement (`fast-cpu-results.md` §1) showed that the worst cut-off errors are
+  in short templates, not the six above. Only the 16 Hz / 2 s / 4 s combinations were measured
+  on the full bank.
+- Kept at 16 Hz, as instructed.
+
 ### Choice
 
 - **Low:** `fd_taper` β = 8 over **16–20 Hz**, out of band, generated from 16 Hz with

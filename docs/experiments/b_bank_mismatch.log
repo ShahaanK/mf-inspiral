@@ -1,0 +1,5 @@
+OMP: Warning #179: Function Can't set size of /tmp file failed:
+PSDs ready 7 s
+bank generated 8 s
+C3_segment0 {"fitting_factor": {"n": 200, "median": 0.994975141516684, "mean": 0.9944132364413487, "p10": 0.9901574232453977, "min": 0.9826712421388567, "frac_below_0p95": 0.0}, "nearest_neighbour": {"n": 431, "median": 0.9885204144844495, "p10": 0.9811486661569064, "min": 0.9583525913674402}} 35 s
+aLIGOZeroDetLowPower {"fitting_factor": {"n": 200, "median": 0.9879009796301019, "mean": 0.9867029241422081, "p10": 0.974358018326872, "min": 0.9618601746909937, "frac_below_0p95": 0.0}, "nearest_neighbour": {"n": 431, "median": 0.9448488918673805, "p10": 0.9298673321612191, "min": 0.8719238542878106}} 63 s

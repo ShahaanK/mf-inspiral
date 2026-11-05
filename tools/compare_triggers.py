@@ -23,12 +23,17 @@ EXACT = ['end_time', 'sigmasq', 'psd_var_val', 'template_duration',
 SNR_RTOL = 1e-5
 PHASE_ATOL = 1e-5
 THRESHOLD = 3.8
+# mf_fast writes only these (docs/design-fast.md §5); --core checks only them.
+CORE = {'snr', 'coa_phase', 'end_time', 'sigmasq', 'template_duration',
+        'template_hash', 'search/start_time', 'search/end_time'}
 
 
-def datasets(f):
+def datasets(f, core=False):
     out = {}
     f.visititems(lambda n, o: out.__setitem__(n, o)
                  if isinstance(o, h5py.Dataset) else None)
+    if core:
+        out = {n: o for n, o in out.items() if n.split('/', 1)[-1] in CORE}
     return out
 
 
@@ -44,11 +49,13 @@ def main():
     p.add_argument('new')
     p.add_argument('--gps-start-time', type=float, default=1186740108)
     p.add_argument('--sample-rate', type=float, default=2048)
+    p.add_argument('--core', action='store_true',
+                   help="Compare only mf_fast's SNR-only core columns.")
     a = p.parse_args()
 
     ok = True
     A, B = h5py.File(a.reference, 'r'), h5py.File(a.new, 'r')
-    da, db = datasets(A), datasets(B)
+    da, db = datasets(A, a.core), datasets(B, a.core)
 
     print("== 1. Structure")
     if set(da) != set(db):
@@ -93,7 +100,7 @@ def main():
     xb = numpy.array([ib[k] for k in common], dtype=numpy.int64)
 
     print("\n== 3. Exact columns on matched triggers")
-    for n in EXACT:
+    for n in (EXACT if not a.core else [c for c in EXACT if c in CORE]):
         if n not in ga and n not in gb:
             print("  %-18s absent from both files" % n)
             continue
