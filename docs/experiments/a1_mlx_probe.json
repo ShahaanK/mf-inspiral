@@ -1,0 +1,50 @@
+[
+ {
+  "device": "cpu",
+  "B": 8,
+  "inputs_mb": 96.0,
+  "step_peak_mb": 341.57018661499023,
+  "step_extra_mb": 245.57018661499023,
+  "max_rel_err_peak_mag_vs_f64": 2.728292995968218e-07
+ },
+ {
+  "device": "cpu",
+  "B": 16,
+  "inputs_mb": 160.0,
+  "step_peak_mb": 643.1629447937012,
+  "step_extra_mb": 483.1629447937012,
+  "max_rel_err_peak_mag_vs_f64": 2.6022667154457224e-07
+ },
+ {
+  "device": "cpu",
+  "B": 32,
+  "inputs_mb": 288.0,
+  "step_peak_mb": 1246.3258819580078,
+  "step_extra_mb": 958.3258819580078,
+  "max_rel_err_peak_mag_vs_f64": 2.4051978575467814e-07
+ },
+ {
+  "device": "gpu",
+  "B": 8,
+  "inputs_mb": 96.0,
+  "step_peak_mb": 378.12501525878906,
+  "step_extra_mb": 282.12501525878906,
+  "max_rel_err_peak_mag_vs_f64": 2.274476108676815e-06
+ },
+ {
+  "device": "gpu",
+  "B": 16,
+  "inputs_mb": 160.0,
+  "step_peak_mb": 771.1629486083984,
+  "step_extra_mb": 611.1629486083984,
+  "max_rel_err_peak_mag_vs_f64": 1.9837540856659786e-06
+ },
+ {
+  "device": "gpu",
+  "B": 32,
+  "inputs_mb": 288.0,
+  "step_peak_mb": 1502.3258819580078,
+  "step_extra_mb": 1214.3258819580078,
+  "max_rel_err_peak_mag_vs_f64": 2.09792190564162e-06
+ }
+]
