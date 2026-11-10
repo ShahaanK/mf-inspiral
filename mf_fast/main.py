@@ -1,8 +1,14 @@
-"""mf_fast: SNR-only triggers from batched short-block matched filtering.
+"""mf_fast: SNR-only triggers from batched matched filtering.
 
-The data front end is PyCBC's with a fixed conditioning preset. Templates are
-PyCBC's, tapered at both band edges and cut to their support (templates.py), and
-filtered in blocks with matchedfilter (search.py). See docs/design-fast.md.
+The data front end is PyCBC's with a fixed conditioning preset. Two backends:
+
+  matchedfilter (default)  PyCBC's templates, tapered at both band edges and cut to
+                           their support (templates.py), filtered in short blocks
+                           with matchedfilter on --device cpu|gpu (search.py).
+                           docs/design-fast.md.
+  mlx                      full-length FFTs in MLX, stock templates by default,
+                           stock's SNR-only output (mlx_backend.py).
+                           docs/design-mlx-backend.md.
 """
 
 import argparse
@@ -35,7 +41,18 @@ def build_parser():
     p.add_argument('--threshold', type=float, default=3.8)
     p.add_argument('--mode', default='peak', choices=['peak'],
                    help="Only 'peak' so far; 'hier' is Phase D.")
-    p.add_argument('--device', default='cpu')
+    p.add_argument('--backend', default='matchedfilter', choices=['matchedfilter', 'mlx'])
+    p.add_argument('--device', default='cpu',
+                   help="matchedfilter backend: cpu or gpu.")
+    p.add_argument('--mlx-device', default='gpu', choices=['gpu', 'cpu'],
+                   help="mlx backend: MLX device (cpu for tests).")
+    p.add_argument('--templates', default='stock', choices=['stock', 'tapered'],
+                   help="mlx backend: stock FilterBank templates (default) or mf_fast's "
+                        "tapered ones (generated per job).")
+    p.add_argument('--cache-limit-mb', type=int, default=512,
+                   help="mlx backend: MLX buffer-cache limit.")
+    p.add_argument('--memory-limit-mb', type=int, default=4096,
+                   help="mlx backend: MLX memory limit.")
     p.add_argument('--block-length', type=int, default=65536)
     p.add_argument('--pad', type=float, default=2.0)
     p.add_argument('--pad-fallback', type=float, default=4.0)
@@ -50,7 +67,8 @@ def build_parser():
     p.add_argument('--load-cache',
                    help="Load a saved template cache instead of building one. Its padding "
                         "decisions are the build job's; sigma^2 is computed for this job.")
-    p.add_argument('--tmpl-batch', type=int, default=64)
+    p.add_argument('--tmpl-batch', type=int, default=None,
+                   help="Templates per batch (default 64 for matchedfilter, 16 for mlx).")
     p.add_argument('--data-batch', type=int, default=0,
                    help="Blocks per filter call (0: all of a segment's blocks).")
     p.add_argument('--fit-only', action='store_true',
@@ -71,8 +89,13 @@ def main(argv=None):
     log("matchedfilter %s, device %s, CPU target %s", matchedfilter.__version__,
         a.device, matchedfilter.backend())
     fe = FrontEnd(a.frame_file, a.channel, a.bank, a.gps_start, a.gps_end,
-                  a.trig_start, a.trig_end, preset=a.conditioning)
+                  a.trig_start, a.trig_end, preset=a.conditioning,
+                  block_series=a.backend != 'mlx')
     tim['front_end'] = time.time() - t0
+    if a.backend == 'mlx':
+        return run_mlx(a, fe, tim, t0, log)
+    if a.tmpl_batch is None:
+        a.tmpl_batch = 64
 
     t = time.time()
     if a.load_cache:
@@ -130,6 +153,33 @@ def main(argv=None):
                     env={k: v for k, v in os.environ.items() if k.startswith(('MF_', 'OMP_'))},
                     matchedfilter=matchedfilter.__version__,
                     backend=matchedfilter.backend())
+        with open(a.timing_json, 'w') as f:
+            json.dump(info, f, indent=1)
+    return 0
+
+
+def run_mlx(a, fe, tim, t0, log):
+    """The mlx backend: stock-layout triggers from full-length MLX FFTs."""
+    from .mlx_backend import MLXSearch, TemplateSource
+    if a.tmpl_batch is None:
+        a.tmpl_batch = 16
+    src = TemplateSource(fe, kind=a.templates, load=a.load_cache, save=a.save_cache,
+                         taper=(a.taper_low, a.taper_high), log=log)
+    search = MLXSearch(fe, src, device=a.mlx_device, tmpl_batch=a.tmpl_batch,
+                       cache_limit_mb=a.cache_limit_mb, memory_limit_mb=a.memory_limit_mb,
+                       log=log)
+    log("mlx backend: %s templates, %s, batch %d, cache %s", a.templates, search.device,
+        a.tmpl_batch, a.load_cache and 'loaded' or (a.save_cache and 'saving') or 'none')
+    ntrig = search.run(a.output)
+    tim.update({'templates_' + k: v for k, v in src.timing.items()})
+    tim.update(search.timing)
+    tim['total'] = time.time() - t0
+    log("wrote %d triggers to %s; peak MLX memory %.0f MB, max RSS %.0f MB", ntrig,
+        a.output, search.memory['mlx_peak_mb'], search.memory['maxrss_mb'])
+    if a.timing_json:
+        info = dict(timing=tim, counts=search.counts, triggers=ntrig, memory=search.memory,
+                    backend='mlx', device=search.device, args=vars(a),
+                    env={k: v for k, v in os.environ.items() if k.startswith(('MF_', 'OMP_'))})
         with open(a.timing_json, 'w') as f:
             json.dump(info, f, indent=1)
     return 0

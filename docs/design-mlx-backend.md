@@ -267,3 +267,38 @@ Commit at the end of A2, with the repo's identity and no trailers.
 4. **The checkpoint adds a projection** of whole-job speed-up against templates per job (431,
    2,000, 10,000, 50,000), from the measured front-end, per-template and fixed costs. It also
    says whether the first run's frame read was cold.
+
+## A2 results (2026-11-09; real MLX, run unsandboxed under your GPU rule)
+
+Built:
+- `mf_fast/mlx_backend.py`: `TemplateSource`, `MLXSearch`, `segment_peaks`, `threshold_bins`.
+- `--backend mlx` and its options in `mf_fast/main.py`.
+- `FrontEnd`:
+  - keeps the conditioned strain;
+  - carries C3's PSD-variation and event-manager options;
+  - skips the block series when the MLX backend doesn't need them.
+- `tests/test_mlx_backend.py`.
+
+The output goes through PyCBC's EventManager exactly as mf_inspiral's does, so the file is stock's
+SNR-only layout.
+
+| test | result |
+|---|---|
+| `tests/test_mlx_backend.py`, MLX CPU device and GPU | 4 cases: n 2¹⁴ and 2¹⁶, a partial last bin, 1024 and 2048 bins, templates on offset sub-bands, 10–59 bins above threshold. Indices identical to matchedfilter's `run()`. Values within 1.9e-7 (CPU) / 1.1e-6 (GPU) of `run()`, and 1.9e-7 / 1.2e-6 of float64. Memory guards OK. **PASS** |
+| whole C3 job, MLX CPU device, stock templates, cache built | against stock C3, **all columns**: structure, gating, attributes and every exact column (end_time, sigmasq, psd_var_val, template_duration, template_hash, all χ²) **identical**. SNR max 4.8e-7. 4 unmatched: two one-sample near-ties. **PASS** |
+| same job, **GPU**, cache loaded | all columns identical, **221,314 of 221,314 matched**, SNR max 2.4e-6, phase max 9.5e-7, 0 unmatched. **PASS**. σ² rebuilt from the cache is bit-identical to stock's. |
+| tapered option, GPU | check A against reference A (`--core`): SNR max 2.4e-6, 2 unmatched (one known one-sample near-tie). **PASS** |
+| matchedfilter CPU backend (regression) | output **bit-identical**, every dataset, to the 9 Nov session's `fastcpu-load-1.hdf` (same cache, same options). `tests/test_fast_blocks.py` all OK. **Note:** the 5 Nov `reference/fast/cpu-load` file differs by up to 2.4e-6 in SNR. That predates f6c2fe6, whose batching changes moved the float32 rounding, so it isn't a valid baseline for this regression. |
+
+**Memory** (timing JSON, correctness runs):
+
+| run | MLX peak | max RSS |
+|---|---|---|
+| GPU, stock, cache loaded | 748 MB | 1.42 GB |
+| GPU, tapered | 748 MB | 1.09 GB |
+| MLX CPU device | 620 MB | 2.33 GB |
+
+On the MLX CPU device, MLX's buffers are ordinary process memory. MLX's buffer cache ended at
+519 MiB against the 512 MiB limit, so the limit is approximate.
+
+**Cache:** `~/benchmark-runs/cache/mlx-stock-c3.h5`, 1.77 GB, outside the repo.
