@@ -56,8 +56,8 @@ waveforms are 10.0 s; mf_fast's cache is built once or loaded).
 | **mf_fast CPU** (n 65536, tb 64, all blocks) | 6.22 | 4.02 | **2.97** |
 | mf_fast GPU, default (tb 64, all blocks) | 11.10 | 7.18 | 1.66 |
 | **mf_fast GPU, best of sweep** (n 65536, tb 64, db 4) | 9.02 | 5.83 | **2.05** |
-| **MLX, stock layout** (2²⁰-point FFTs, 16 templates/batch) | 3.13 | 2.03 | **5.89** |
-| MLX, 65536 blocks | — | — | failed (my bug, fixed; to rerun) |
+| **MLX, stock layout** (2²⁰-point FFTs, 16 templates/batch) | 3.13 | 2.03 | **5.89** (no phase gather; 5.22× with it, §4.4) |
+| MLX, 65536 blocks | 6.59 (§4.4) | 4.26 | 2.80 |
 
 Whole-job wall time (one 1800 s job, 4 segments):
 
@@ -134,12 +134,94 @@ and loses at 32768.
   max and threshold as mf_fast, but its candidates aren't converted to triggers. Its check against
   float64 on the first batch was 3.2e-6.
 
-## 4. Still to run (GPU, outside Claude)
+## 4. Follow-up session 2026-11-09 (`~/benchmark-runs/20261109-194150-followup/`)
 
-1. `tools/gpu_gain_check.py`: isolates bug #2.
-2. `python -m matchedfilter.benchmark --n 4096 8192 16384 32768 65536 --no-hier`: the package's
-   own CPU vs GPU cost per pair, across n.
-3. MLX 65536-block baseline: rerun after the fix (`valid` was reused as an accumulator in
-   `run_blocks`).
-4. One mf_fast GPU run with autotuning on (`MF_AUTOTUNE` unset), to check that `MF_AUTOTUNE=0`
-   didn't pin a slow kernel choice.
+Run by you with `followup.zsh`, at working tree d7fefbb plus the uncommitted `mf_fast/main.py`
+and `tools/mlx_baseline.py` changes. Every run's log and `runs.txt` record its autotune setting.
+
+### 4.1 The 26 unmatched GPU triggers (check A, autotune-on run; same as the session)
+
+Classified at bin level. For each one I recomputed the float64 full-length correlation for that
+template and segment and looked at the neighbouring bins.
+
+| class | count | what happens |
+|---|---|---|
+| threshold | 13 | reference SNR 3.8000031–3.8000472. The GPU's −1.23e-5 (×3.8 = −4.7e-5) puts them under 3.8. `compare_triggers` labels only 9 as "within threshold band" because its band is narrower than this offset. |
+| one-sample swaps | 2 pairs | the bin's best and second-best samples differ by 1.3e-7 and 3.7e-7 relative. MLX flips one of them as well. |
+| adjacent-bin swaps | 3 pairs | the next bin's peak is within 5.8e-7 to 1.3e-5 relative, so the GPU keeps that bin's peak instead (848–1686 samples later). The bin after it is quieter, so it survives. |
+| lost with no partner | 3 | SNR 3.93/3.93/4.07. The next bin's peak is within 2.5e-8 / 5.0e-6 / 1.5e-6 relative. On the GPU it edges ahead, so this bin fails the symmetric rule. That neighbour then fails too, because the bin after it is louder (SNR 4.13/4.35/4.20). PyCBC's symmetric rule, not findchirp clustering. |
+
+Total 13 + 2×2 + 3×2 + 3 = 26. Apart from the threshold class, these are near-ties whose
+order the GPU's scatter decides.
+
+### 4.2 Autotune on vs off (n 65536, 64 templates, 4 blocks; same session)
+
+| | filter s | total s | autotune decisions logged | cost file written |
+|---|---|---|---|---|
+| `MF_AUTOTUNE=0` | 9.007 | 17.17 | — | — |
+| on (`MF_COST_FILE` in `$OUT`, `MF_AUTOTUNE_LOG=1`) | 9.013 | 17.15 | none | none |
+
+Autotune made no choices on this path. Its trials cover CPU block sizes in
+`TimeDomainFilterBank`, the Q15 screen, and hierarchical gate chains. GPU peak-only
+`run_blocks` at a fixed n and batch has nothing to tune, so `MF_AUTOTUNE=0` cost nothing. Which
+Metal kernel ran isn't logged by the package, so I can't name it. Check A is unchanged (identical
+output).
+
+### 4.3 matchedfilter's own benchmark (`python -m matchedfilter.benchmark`)
+
+| n | pairs | CPU 1 thread µs/pair | GPU µs/pair | GPU ns / sample | GPU vs CPU |
+|---|---|---|---|---|---|
+| 4096 | 32768 | 7.19 | 0.80 | 0.20 | 9.0× |
+| 8192 | 32768 | 14.78 | 1.88 | 0.23 | 7.9× |
+| 16384 | 32768 | 34.57 | 12.71 | 0.78 | 2.7× |
+| 32768 | 32768 | 71.68 | 70.27 | 2.14 | 1.0× |
+| 65536 | 8192 | 146.91 | 259.50 | 3.96 | 0.6× |
+
+- **The library itself is slow at large n on the M2.** Its own GPU cost per sample rises
+  20× from 4096 to 65536. The GPU beats one CPU core only up to 16384.
+- **mf_fast gets what the library delivers:** 70 µs/pair at 32768 (library 70.3) and 226 µs/pair
+  at 65536 (library 259.5; mf_fast's 4-block batches do slightly better than the benchmark's).
+  Our use isn't the bottleneck.
+- **Why (inference, not measured):** the cliff starts at 16384 and steepens at 32768, the same
+  lengths where Apple's 32 KB threadgroup memory forces the portable `_lds32` kernels, and the
+  pair limit 2²⁸/n applies.
+- **What this means for 8×:** the library's sweet spot (4096–8192, 0.2 ns per sample) is about
+  17× cheaper per sample than 65536. But blocks that short don't fit this bank's templates, whose
+  support before lag 0 is 3.4–14.1 s. Reaching it would mean splitting templates in time.
+
+### 4.4 MLX baseline, now with phase and clustering
+
+| | gpu_s (median of 3) | post_s | ns / valid sample | × stock MF step | check A (431 templates) |
+|---|---|---|---|---|---|
+| full 2²⁰ (stock layout) | 3.534 | 0.040 | 2.29 (2.31 with post) | 5.22 (5.16 with post) | **PASS** |
+| 65536 blocks (1 run) | 6.591 | — (no clustering) | 4.26 | 2.80 | not run (timing only) |
+| mf_fast GPU, same blocks | 9.007 | 0.13 (stitch + cluster) | 5.82 | 2.05 | FAIL (bug #2) |
+
+- **What gpu_s now covers:** product, inverse FFT, |z|², per-bin max and argmax, the complex
+  value at the argmax (gives phase), threshold, and copy to the host. Clustering (the symmetric
+  rule and findchirp, exactly as reference A) is `post_s`.
+- **Not included in either path:** making and uploading templates.
+- **Cost of the additions:** the gather adds 0.40 s over the session's 3.13 s, so 5.89× is now
+  5.22× like for like.
+- **Check A, MLX full, all 431 templates:** 221,301 of 221,302 matched; SNR max 2.5e-6,
+  median 7.9e-7; phase max 7.2e-7; 2 unmatched (one pair, the same one-sample near-tie as on the
+  GPU path); **PASS**. Its first-batch float64 check is 3.2e-6 in power.
+- **The blocks run:** MLX's plain FFT on the same 32 s blocks (38,724 pairs at 16 templates per
+  batch) beats matchedfilter's fused kernel by 1.37×.
+
+### 4.5 Spotlight and other load
+
+`mds_stores` before each follow-up run: 3.3–16.5% (12.6% at the end). `launchd` was 31.5%
+before the MLX blocks run. These are single samples taken before each run, not during it.
+
+No timing tracks them:
+- autotune off 9.007 s (Spotlight 3.3%) vs on 9.013 s (16.5%);
+- MLX full 3.586 / 3.534 / 3.531 s at 3.6 / 8.4 / 16.1%, so the run with the least Spotlight was
+  the slowest;
+- in the session, the 115% sample before sweep n65536-tb64-db4-1 coincides with that run being
+  2% slower than its repeats (9.22 vs 9.02/9.01 s). That's the only possible effect, and it's
+  within what I'd call noise.
+
+Separately, `mlx-full-1`'s wall time (41.3 s vs 29.0/27.6 s) includes Matplotlib building its font
+cache: the follow-up used a fresh `MPLCONFIGDIR`, as with the session's stock-1. Its gpu_s isn't
+affected.

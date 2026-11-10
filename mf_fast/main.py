@@ -8,6 +8,7 @@ filtered in blocks with matchedfilter (search.py). See docs/design-fast.md.
 import argparse
 import json
 import logging
+import os
 import time
 
 import matchedfilter
@@ -126,6 +127,7 @@ def main(argv=None):
                     fallback_rows=fb.tolist(), switch_rule=cache.switch_rule,
                     templates_used=len(cache.rows),
                     args=vars(a),
+                    env={k: v for k, v in os.environ.items() if k.startswith(('MF_', 'OMP_'))},
                     matchedfilter=matchedfilter.__version__,
                     backend=matchedfilter.backend())
         with open(a.timing_json, 'w') as f:

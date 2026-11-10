@@ -48,7 +48,7 @@ n = 65536.
 **GPU:** the GPU series path uses the same 1/n convention: the GPU SNRs land within
 2.3e-5 of the CPU ones with the same `block_scale` (see #2 for the remaining 1.2e-5).
 
-## 2. GPU peak values sit about 1.2e-5 low against CPU and float64 (2026-11-09, cause not yet isolated)
+## 2. The GPU transform loses gain that grows with n: peaks 1.2e-5 low at n = 65536 (2026-11-09, confirmed on synthetic data)
 
 **Severity:** accuracy. Small, but above the 1e-5 tolerance, and it fails check A for the GPU path.
 
@@ -71,7 +71,27 @@ n = 4096–65536 with `run_blocks` and `run()` on CPU and GPU, and compares both
 - An offset that grows with log₂ n would point at the FFT twiddles.
 - One that's the same at every n would point at a normalisation step.
 
-**Not run yet.**
+**Result** (`~/benchmark-runs/20261109-194150-followup/gpu-gain-check.log`): median of
+|GPU|/float64 − 1 over the bin peaks. The CPU stays within 1.5e-7 at every n.
+
+| n | `run()` (inverse only) | `run_blocks` (forward + inverse) |
+|---|---|---|
+| 4096 | −1.1e-6 | −2.2e-6 |
+| 8192 | −1.2e-6 | −2.5e-6 |
+| 16384 | −1.1e-6 | −2.3e-6 |
+| 32768 | −3.3e-6 | −6.4e-6 |
+| 65536 | −6.2e-6 | **−1.23e-5** |
+
+- **Reproduces the job exactly:** `run_blocks` at 65536 gives −1.23e-5, the same offset mf_fast
+  shows on real data. So the offset is matchedfilter's, not mf_fast's.
+- **Per-transform:** `run_blocks` does two GPU transforms (the block forward FFT and the
+  inverse), and its deficit is twice `run()`'s at every n.
+- **Grows with n, but not as log₂ n:** it's flat at about 1.1e-6 per transform up to 16384,
+  then roughly doubles with each doubling of n. The jump starts at 32768, where the GPU pair
+  limit 2²⁸/n starts to apply and the kernels change (`matchedfilter-internals.md` §2). Which
+  step loses the gain (twiddles, a multi-pass stage, or a scale) is unknown.
+- **Not visible in `python -m matchedfilter.benchmark`:** its accuracy column checks the CPU
+  result only. Its GPU column is timing only (`benchmark.py:248-285`).
 
 **Impact:** the GPU path fails check A (SNR tolerance; unmatched 21–27 vs a limit of 22, all
 near-threshold or one-sample peak moves). mf_fast's GPU results are reported with this caveat.
