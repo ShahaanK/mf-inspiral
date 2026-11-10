@@ -78,6 +78,46 @@ def sigmasq_from_power(power, psd, kmin, delta_f):
     return 4.0 * delta_f * float(numpy.sum(power.astype(numpy.float64) / p))
 
 
+def _npz_member_memmap(path, name):
+    """Map one member of an uncompressed .npz read-only, or return None.
+
+    numpy.load ignores mmap_mode for .npz files and reads every member into the
+    process's own memory. A stored (uncompressed) member is a plain .npy block
+    inside the zip, so it can be mapped in place: clean file pages are then shared
+    through the page cache by every process that maps the same cache file.
+    """
+    import struct
+    import zipfile
+    with zipfile.ZipFile(path) as z:
+        try:
+            info = z.getinfo(name + '.npy')
+        except KeyError:
+            return None
+        if info.compress_type != zipfile.ZIP_STORED:
+            return None
+        with open(path, 'rb') as f:
+            f.seek(info.header_offset)
+            head = f.read(30)
+            if head[:4] != b'PK\x03\x04':
+                return None
+            nlen, xlen = struct.unpack('<HH', head[26:30])
+            start = info.header_offset + 30 + nlen + xlen
+            f.seek(start)
+            fmt = numpy.lib.format
+            version = fmt.read_magic(f)
+            if version == (1, 0):
+                shape, fortran, dtype = fmt.read_array_header_1_0(f)
+            elif version == (2, 0):
+                shape, fortran, dtype = fmt.read_array_header_2_0(f)
+            else:
+                return None
+            offset = f.tell()
+        if dtype.hasobject:
+            return None
+        return numpy.memmap(path, dtype=dtype, mode='r', offset=offset, shape=shape,
+                            order='F' if fortran else 'C')
+
+
 def sigmasq(H, psd, kmin, kmax, delta_f):
     """sigma^2 of spectrum H over [kmin, kmax), by the float32-power definition."""
     return sigmasq_from_power(template_power(H, kmin, kmax), psd, kmin, delta_f)
@@ -106,6 +146,7 @@ class TemplateCache(object):
             'taper_high', 'pad_base', 'pad_fallback', 'switch_rule', 'bank_file')
     ARRAYS = ('rows', 'hashes', 'duration', 'chirp', 'L', 'R', 'pad', 'cutoff_estimate',
               'spectra')
+    MAPPED = ('spectra',)            # plus 'power', handled separately in load
 
     @classmethod
     def build(cls, bank, frontend, bank_file, n=65536, pad=2.0, pad_fallback=4.0,
@@ -239,10 +280,20 @@ class TemplateCache(object):
             bad['bank_file'] = (meta['bank_file'], bank_file)
         if bad:
             raise ValueError("template cache %s doesn't match this job: %s" % (path, bad))
+        # the two large members (spectra, power) are mapped read-only when stored
+        # uncompressed, so concurrent jobs share one copy; the rest are read
+        c.mapped = []
         for k in cls.ARRAYS:
-            setattr(c, k, z[k])
+            m = _npz_member_memmap(path, k) if k in cls.MAPPED else None
+            if m is not None:
+                c.mapped.append(k)
+            setattr(c, k, z[k] if m is None else m)
         lens = z['power_len']
-        flat = z['power']
+        flat = _npz_member_memmap(path, 'power')
+        if flat is None:
+            flat = z['power']
+        else:
+            c.mapped.append('power')
         ends = numpy.cumsum(lens)
         c.power = [flat[e - n:e] for e, n in zip(ends, lens)]
         c.build_timing = None

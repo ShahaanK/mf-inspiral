@@ -104,8 +104,8 @@ def main(argv=None):
             raise SystemExit("cache %s was built for n=%d, not --block-length %d"
                              % (a.load_cache, cache.n, a.block_length))
         tim['cache_load'] = cache.load_time
-        log("loaded template cache %s in %.2f s (sigma^2 %.2f s)", a.load_cache,
-            cache.load_time, cache.sigmasq_time)
+        log("loaded template cache %s in %.2f s (sigma^2 %.2f s); mapped read-only: %s",
+            a.load_cache, cache.load_time, cache.sigmasq_time, ', '.join(cache.mapped) or 'none')
     else:
         measured = None
         if a.cutoff_measurements:
