@@ -45,5 +45,33 @@ n = 65536.
 - mf_fast scales templates for the series convention: `templates.TemplateCache.block_scale`, tested
   in `tests/test_fast_blocks.py`.
 
-**Not checked:** whether the GPU series path uses the same convention. That's part of the
-Phase C GPU check.
+**GPU:** the GPU series path uses the same 1/n convention: the GPU SNRs land within
+2.3e-5 of the CPU ones with the same `block_scale` (see #2 for the remaining 1.2e-5).
+
+## 2. GPU peak values sit about 1.2e-5 low against CPU and float64 (2026-11-09, cause not yet isolated)
+
+**Severity:** accuracy. Small, but above the 1e-5 tolerance, and it fails check A for the GPU path.
+
+**What:**
+- Same job, same saved template cache (`--load-cache`), only `--device` differs:
+  - CPU: SNR within 4.4e-6 of reference A (median 0).
+  - GPU: every SNR is low by 1.23e-5 (median −1.23e-5, spread σ 2.8e-6, range −2.31e-5 to
+    −2.1e-6 over 221,281 matched triggers).
+- The offset is the same in all four segments, and for every template: per-template medians run
+  from −1.29e-5 to −1.17e-5. It doesn't correlate with SNR (r = 0.002) or with σ² (r = 0.01).
+- Identical on all three repeats and in every n = 65536 sweep configuration (template batch
+  4–178, data batch 4 or all).
+- mf_fast passes nothing device-specific except `device=` to `MatchedFilter`
+  (`mf_fast/search.py:132`). So the offset comes from inside matchedfilter's GPU path.
+- Removing the constant still leaves a GPU spread (σ 2.8e-6) about 4× the CPU's (7.6e-7), with
+  extremes near ±1.1e-5. The scatter is a second, separate effect.
+
+**Minimal repro:** `tools/gpu_gain_check.py`, which needs the GPU. It filters synthetic data at
+n = 4096–65536 with `run_blocks` and `run()` on CPU and GPU, and compares both with float64 numpy.
+- An offset that grows with log₂ n would point at the FFT twiddles.
+- One that's the same at every n would point at a normalisation step.
+
+**Not run yet.**
+
+**Impact:** the GPU path fails check A (SNR tolerance; unmatched 21–27 vs a limit of 22, all
+near-threshold or one-sample peak moves). mf_fast's GPU results are reported with this caveat.
