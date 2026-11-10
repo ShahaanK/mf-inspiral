@@ -290,7 +290,7 @@ class MLXSearch(object):
     """Filter every template against every segment in batches on MLX, and write
     stock's trigger file through PyCBC's EventManager."""
 
-    def __init__(self, fe, source, device='gpu', tmpl_batch=16, cache_limit_mb=512,
+    def __init__(self, fe, source, device='gpu', tmpl_batch=8, cache_limit_mb=512,
                  memory_limit_mb=4096, log=None):
         self.mx = mx = _mx()
         self.fe, self.src = fe, source

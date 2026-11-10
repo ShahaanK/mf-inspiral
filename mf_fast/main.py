@@ -68,7 +68,7 @@ def build_parser():
                    help="Load a saved template cache instead of building one. Its padding "
                         "decisions are the build job's; sigma^2 is computed for this job.")
     p.add_argument('--tmpl-batch', type=int, default=None,
-                   help="Templates per batch (default 64 for matchedfilter, 16 for mlx).")
+                   help="Templates per batch (default 64 for matchedfilter, 8 for mlx).")
     p.add_argument('--data-batch', type=int, default=0,
                    help="Blocks per filter call (0: all of a segment's blocks).")
     p.add_argument('--fit-only', action='store_true',
@@ -162,7 +162,7 @@ def run_mlx(a, fe, tim, t0, log):
     """The mlx backend: stock-layout triggers from full-length MLX FFTs."""
     from .mlx_backend import MLXSearch, TemplateSource
     if a.tmpl_batch is None:
-        a.tmpl_batch = 16
+        a.tmpl_batch = 8
     src = TemplateSource(fe, kind=a.templates, load=a.load_cache, save=a.save_cache,
                          taper=(a.taper_low, a.taper_high), log=log)
     search = MLXSearch(fe, src, device=a.mlx_device, tmpl_batch=a.tmpl_batch,

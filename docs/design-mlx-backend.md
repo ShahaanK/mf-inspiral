@@ -74,7 +74,7 @@ New module `mf_fast/mlx_backend.py`, selected with `--backend`:
 ```
 mf_fast ... --backend matchedfilter   (default; today's short-block path, --device cpu|gpu)
 mf_fast ... --backend mlx [--mlx-device gpu|cpu] [--templates stock|tapered]
-            [--tmpl-batch 16] [--save-cache F | --load-cache F]
+            [--tmpl-batch 8] [--save-cache F | --load-cache F]
 ```
 
 - **`--backend matchedfilter`:** the existing `Search` + `TemplateCache`, unchanged. `--device cpu`
@@ -142,7 +142,9 @@ That's about 38 MB of transient memory per template: the product, the transform,
 imaginary parts, |z|², and the reductions, all at 2²⁰ points. The MLX baseline measured
 **2.05 ms per pair** at B = 16. The session will sweep B ∈ {8, 16, 32} once (§7) before fixing it.
 
-**Choice: B = 16 by default.**
+**Choice at design time: B = 16 by default.** The session sweep (see `docs/mlx-results.md`) found B = 8
+faster (filter step 2.93 s against 3.58 s) and lighter (MLX peak 384 MB against 748 MB), so the
+default is now **B = 8**.
 
 | item | size |
 |---|---|
